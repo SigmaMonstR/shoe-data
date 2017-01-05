@@ -1,0 +1,102 @@
+---
+title: "Stockx - Shoes"
+date: "January 4, 2017"
+output: html_document
+---
+
+What can we do with the StockX shoe data? Well, let's see...
+
+##Setting up the data
+First, we'll read in the Excel file, skipping the first 7 lines.
+```{r, warning=FALSE, message=FALSE}
+library(gdata)
+
+#Read in data
+  df <- read.xls("http://datanerd.stockx.com/stockx-2016-jordan-NMD-resell-ROI-010317.xlsx", sheet = 2, skip=7, header = TRUE)
+
+#What's in the data?
+  colnames(df)
+```
+
+Now let's prep the data. We'll do a matrix expansion of the color attributes, the shoe models, and clean up on the numerics.
+```{r, warning=FALSE, message=FALSE}
+#clean
+  df <- df[,1:13]
+  
+#Clean up numerics
+  for(k in c(7:13)){
+    df[,k] <- as.numeric(gsub("[^[:alnum:][:space:].]","", as.character(df[,k])))
+  }
+  df$log_retail <- log(df$Retail.Price)
+  
+  
+#expand colorway into matrix
+  #Set delimiter to commas
+  df[,4] <- trimws(gsub("[[:punct:]]",", ", as.character(df[,4])))
+  
+  #Split by comma delimiter 
+  colors <- strsplit(df$Colorway,",")
+  uni <- unique(trimws(unlist(colors)))
+  
+  #Expand into matrix
+  mat <- matrix(nrow = nrow(df), ncol=length(uni))
+  mat2 <- as.data.frame(mat)
+  colnames(mat2) <- uni
+  for(k in 1:length(colors)){
+    temp <- trimws(unlist(colors[k]))
+    temp <- temp[temp!=""]
+    for(i in 1:length(temp)){
+      mat2[[temp[i]]][k] <- 1
+    }
+  }
+  
+  #Plug in zeros
+  mat2[is.na(mat2)] <- 0
+
+  #Expand model
+  df <-cbind(df,mat2)
+  df <- cbind(df,model.matrix( ~ Model. - 1, data=df ))
+
+```
+
+Now that the data is in the right shape, we can estimate which factors give the greatest sales lift for each Jordans and NMDs. The estimation strategy will follow a log-log form:
+
+$$ log(Last Sale)_i = f(Color Way, Model, log(Retail Price), Total Market) $$
+
+where $i$ is an index of brand. Essentially, we'll produce a model per brand. As the dimensions are are nearly $n x n$, it makes most sense to use a form of regularization to conduct feature selection.
+
+
+```{r, warning=FALSE, message=FALSE}
+#drop 
+  df <- df[df$log_retail!=-Inf & log(df$Last.Sale)!=-Inf,]
+  
+#Split data
+  jordans <- df[as.character(df$Jordan.NMD)=="Jordan",]
+  nmd <- df[df$Jordan.NMD=="NMD",]
+    
+#models
+  library(glmnet)
+  library(DT)
+  
+  nike_fit <- cv.glmnet(as.matrix(jordans[,c(11,14:(ncol(jordans)-1))]), log(jordans$Last.Sale), type.measure = "mse", nfolds = 4)
+  nike_coef <- coef(nike_fit, s = "lambda.min")
+  
+  adidas_fit = cv.glmnet(as.matrix(nmd[,c(11,14:(ncol(nmd)-1))]), log(nmd$Last.Sale), type.measure = "mse", nfolds = 4)
+  adidas_coef <- coef(adidas_fit, s = "lambda.min")
+  
+#Consolidate results
+  coef_result <- as.matrix(cbind(nike_coef, adidas_coef))
+  coef_result <- as.data.frame(coef_result)
+  coef_result <- coef_result[coef_result[,1]!=0 | coef_result[,2]!=0,]
+  coef_result$names <- row.names(coef_result)
+  colnames(coef_result) <- c("Jordans","NMDs", "Features")
+  coef_result <- coef_result[,c(3,1,2)]
+  datatable(coef_result)
+  
+#Model results
+  par(mfrow=c(1,2))
+  plot(adidas_fit, sub="NMDs error rate")
+  plot(nike_fit, sub="Jordans error rate")
+```
+
+
